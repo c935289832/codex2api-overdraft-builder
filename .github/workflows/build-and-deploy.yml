@@ -1,0 +1,143 @@
+name: Build and deploy patched Codex2API
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 */6 * * *"
+  push:
+    branches: [main]
+    paths:
+      - codex-overdraft.patch
+      - deploy_hf.py
+      - .github/workflows/build-and-deploy.yml
+
+concurrency:
+  group: codex2api-overdraft-deploy
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  UPSTREAM_REPO: https://github.com/james-6-23/codex2api.git
+  HF_SPACE_ID: axm0121/SelfCodex2api
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Check out patch repository
+        uses: actions/checkout@v4
+
+      - name: Resolve upstream version
+        id: upstream
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha="$(git ls-remote "$UPSTREAM_REPO" refs/heads/main | awk '{print $1}')"
+          test -n "$sha"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "short_sha=${sha:0:12}" >> "$GITHUB_OUTPUT"
+
+      - name: Check deployed version
+        id: deploy_check
+        shell: bash
+        env:
+          UPSTREAM_SHA: ${{ steps.upstream.outputs.sha }}
+        run: |
+          set -euo pipefail
+          current="$(curl -fsSL "https://huggingface.co/spaces/${HF_SPACE_ID}/resolve/main/UPSTREAM_VERSION" 2>/dev/null | tr -d '\r\n ' || true)"
+          needed=false
+          if [[ "$current" != "$UPSTREAM_SHA" || "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+            needed=true
+          fi
+          echo "current=$current" >> "$GITHUB_OUTPUT"
+          echo "needed=$needed" >> "$GITHUB_OUTPUT"
+
+      - name: Check out exact upstream commit
+        if: steps.deploy_check.outputs.needed == 'true'
+        shell: bash
+        env:
+          UPSTREAM_SHA: ${{ steps.upstream.outputs.sha }}
+        run: |
+          set -euo pipefail
+          git init upstream
+          git -C upstream remote add origin "$UPSTREAM_REPO"
+          git -C upstream fetch --depth=1 origin "$UPSTREAM_SHA"
+          git -C upstream checkout --detach FETCH_HEAD
+          git -C upstream apply --3way "$GITHUB_WORKSPACE/codex-overdraft.patch"
+          git -C upstream diff --check
+
+      - name: Set up Node.js
+        if: steps.deploy_check.outputs.needed == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: upstream/frontend/package-lock.json
+
+      - name: Build current upstream frontend
+        if: steps.deploy_check.outputs.needed == 'true'
+        working-directory: upstream/frontend
+        env:
+          VITE_APP_VERSION: overdraft+${{ steps.upstream.outputs.short_sha }}
+        run: |
+          npm ci --no-audit --no-fund
+          npm run build
+
+      - name: Set up Go
+        if: steps.deploy_check.outputs.needed == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.26.6"
+          cache-dependency-path: upstream/go.sum
+
+      - name: Test patch
+        if: steps.deploy_check.outputs.needed == 'true'
+        working-directory: upstream
+        run: go test ./auth ./proxy -run CodexQuotaOverdraft -count=1
+
+      - name: Build Linux service
+        if: steps.deploy_check.outputs.needed == 'true'
+        working-directory: upstream
+        env:
+          UPSTREAM_SHA: ${{ steps.upstream.outputs.sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/dist"
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+            -buildvcs=false \
+            -trimpath \
+            -ldflags="-s -w -X github.com/codex2api/internal/version.Version=codex-overdraft+${UPSTREAM_SHA}" \
+            -o "$GITHUB_WORKSPACE/dist/codex2api" .
+          chmod 0755 "$GITHUB_WORKSPACE/dist/codex2api"
+          printf '%s\n' "$UPSTREAM_SHA" > "$GITHUB_WORKSPACE/dist/UPSTREAM_VERSION"
+          python - <<'PY'
+          import json, os
+          from pathlib import Path
+
+          sha = os.environ["UPSTREAM_SHA"]
+          data = {
+              "upstream_repo": os.environ["UPSTREAM_REPO"],
+              "upstream_sha": sha,
+              "upstream_short_sha": sha[:12],
+              "workflow_run_id": os.environ["GITHUB_RUN_ID"],
+              "workflow_run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+          }
+          Path(os.environ["GITHUB_WORKSPACE"], "dist", "BUILD_INFO.json").write_text(
+              json.dumps(data, indent=2) + "\n", encoding="utf-8"
+          )
+          PY
+
+      - name: Install Hugging Face client
+        if: steps.deploy_check.outputs.needed == 'true'
+        run: python -m pip install --disable-pip-version-check "huggingface_hub>=1.0,<2"
+
+      - name: Deploy to Hugging Face Space
+        if: steps.deploy_check.outputs.needed == 'true'
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          DEPLOY_DIR: dist
+        run: python deploy_hf.py

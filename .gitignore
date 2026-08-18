@@ -1,0 +1,4 @@
+/upstream/
+/dist/
+__pycache__/
+*.pyc
