@@ -37,8 +37,19 @@ jobs:
           set -euo pipefail
           sha="$(git ls-remote "$UPSTREAM_REPO" refs/heads/main | awk '{print $1}')"
           test -n "$sha"
+          tag_ref="$(git ls-remote --tags --refs "$UPSTREAM_REPO" 'refs/tags/v*' \
+            | awk '{print $2}' \
+            | sed 's#^refs/tags/##' \
+            | sort -V \
+            | tail -n 1)"
+          test -n "$tag_ref"
+          base_version="$tag_ref"
+          [[ "$base_version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]
           echo "sha=$sha" >> "$GITHUB_OUTPUT"
           echo "short_sha=${sha:0:12}" >> "$GITHUB_OUTPUT"
+          echo "base_version=$base_version" >> "$GITHUB_OUTPUT"
+          echo "build_version=${base_version}+overdraft.${sha:0:12}" >> "$GITHUB_OUTPUT"
+          echo "Resolved upstream $sha from base release $base_version"
 
       - name: Check deployed version
         id: deploy_check
@@ -49,7 +60,11 @@ jobs:
           set -euo pipefail
           current="$(curl -fsSL "https://huggingface.co/spaces/${HF_SPACE_ID}/resolve/main/UPSTREAM_VERSION" 2>/dev/null | tr -d '\r\n ' || true)"
           needed=false
-          if [[ "$current" != "$UPSTREAM_SHA" || "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
+          force=false
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" || "${GITHUB_EVENT_NAME}" == "push" ]]; then
+            force=true
+          fi
+          if [[ "$current" != "$UPSTREAM_SHA" || "$force" == true ]]; then
             needed=true
           fi
           echo "current=$current" >> "$GITHUB_OUTPUT"
@@ -81,7 +96,7 @@ jobs:
         if: steps.deploy_check.outputs.needed == 'true'
         working-directory: upstream/frontend
         env:
-          VITE_APP_VERSION: overdraft+${{ steps.upstream.outputs.short_sha }}
+          VITE_APP_VERSION: ${{ steps.upstream.outputs.build_version }}
         run: |
           npm ci --no-audit --no-fund
           npm run build
@@ -107,10 +122,11 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$GITHUB_WORKSPACE/dist"
+          build_version="${{ steps.upstream.outputs.build_version }}"
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
             -buildvcs=false \
             -trimpath \
-            -ldflags="-s -w -X github.com/codex2api/internal/version.Version=codex-overdraft+${UPSTREAM_SHA}" \
+            -ldflags="-s -w -X github.com/codex2api/internal/version.Version=${build_version}" \
             -o "$GITHUB_WORKSPACE/dist/codex2api" .
           chmod 0755 "$GITHUB_WORKSPACE/dist/codex2api"
           printf '%s\n' "$UPSTREAM_SHA" > "$GITHUB_WORKSPACE/dist/UPSTREAM_VERSION"
@@ -123,6 +139,8 @@ jobs:
               "upstream_repo": os.environ["UPSTREAM_REPO"],
               "upstream_sha": sha,
               "upstream_short_sha": sha[:12],
+              "upstream_base_version": "${{ steps.upstream.outputs.base_version }}",
+              "build_version": "${{ steps.upstream.outputs.build_version }}",
               "workflow_run_id": os.environ["GITHUB_RUN_ID"],
               "workflow_run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
           }
