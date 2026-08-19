@@ -311,7 +311,7 @@ index d89c4a2..2a67b96 100644
  	}
  
 diff --git a/auth/store.go b/auth/store.go
-index 93c5daa..240060e 100644
+index c00b13b..d6e0483 100644
 --- a/auth/store.go
 +++ b/auth/store.go
 @@ -183,6 +183,17 @@ type Account struct {
@@ -346,18 +346,16 @@ index 93c5daa..240060e 100644
  	a.DynamicConcurrencyLimit = a.smartPacingConcurrencyLimitLocked(a.DynamicConcurrencyLimit, now)
  	if a.premium5hRateLimitedLocked(now) && a.DynamicConcurrencyLimit > 1 {
  		a.DynamicConcurrencyLimit = 1
-@@ -1242,16 +1258,18 @@ func (a *Account) IsAvailable() bool {
+@@ -1246,15 +1262,17 @@ func (a *Account) isAvailableLocked(now time.Time) bool {
  	if a.healthTierLocked() == HealthTierBanned {
  		return false
  	}
--	if a.Status == StatusCooldown && time.Now().Before(a.CooldownUtil) {
-+	now := time.Now()
+-	if a.Status == StatusCooldown && now.Before(a.CooldownUtil) {
 +	overdraftUsageBypass := a.codexQuotaOverdraftUsageGateBypassLocked(now)
 +	if a.Status == StatusCooldown && now.Before(a.CooldownUtil) &&
 +		!(overdraftUsageBypass && a.codexQuotaOverdraftUsageCooldownLocked(now)) {
  		return false
  	}
--	now := time.Now()
  	// IgnoreUsageLimitStatus only protects an already active continuation;
  	// fresh sessions remain fenced by the latest local usage observation.
 -	if a.usageWindowBlocksFreshDispatchLocked(now) {
@@ -369,7 +367,7 @@ index 93c5daa..240060e 100644
  		return false
  	}
  	// 冷却期过了自动恢复
-@@ -4894,6 +4912,7 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
+@@ -4898,6 +4916,7 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
  	// 恢复积分余额快照：积分只有 wham 探针能刷，不恢复的话重启后账号会被判成
  	// 「没积分」——积分顶替限流失效，还会被「清理限流账号」当成真限流删掉。
  	account.RestoreCreditBalanceFromJSON(row.GetCredential("codex_credits"))
@@ -377,33 +375,33 @@ index 93c5daa..240060e 100644
  	if threshold, ok := row.GetCredentialFloat64("auto_pause_5h_threshold"); ok {
  		account.AutoPause5hThreshold = normalizeQuotaAutoPauseThreshold(threshold)
  	}
-@@ -5505,19 +5524,21 @@ func (s *Store) accountLazySelectable(acc *Account) bool {
- 	acc.mu.RLock()
- 	defer acc.mu.RUnlock()
- 	now := time.Now()
-+	overdraftUsageBypass := acc.codexQuotaOverdraftUsageGateBypassLocked(now)
- 	if acc.Status == StatusError {
+@@ -5586,19 +5605,21 @@ func (s *Store) accountLazySelectable(acc *Account) bool {
+ }
+ 
+ func (a *Account) lazySelectableLocked(now time.Time) bool {
++	overdraftUsageBypass := a.codexQuotaOverdraftUsageGateBypassLocked(now)
+ 	if a.Status == StatusError {
  		return false
  	}
- 	if acc.healthTierLocked() == HealthTierBanned {
+ 	if a.healthTierLocked() == HealthTierBanned {
  		return false
  	}
--	if acc.usageWindowBlocksFreshDispatchLocked(now) {
-+	if acc.usageWindowBlocksFreshDispatchLocked(now) && !overdraftUsageBypass {
+-	if a.usageWindowBlocksFreshDispatchLocked(now) {
++	if a.usageWindowBlocksFreshDispatchLocked(now) && !overdraftUsageBypass {
  		return false
  	}
--	if acc.Status == StatusCooldown && now.Before(acc.CooldownUtil) {
-+	if acc.Status == StatusCooldown && now.Before(acc.CooldownUtil) &&
-+		!(overdraftUsageBypass && acc.codexQuotaOverdraftUsageCooldownLocked(now)) {
+-	if a.Status == StatusCooldown && now.Before(a.CooldownUtil) {
++	if a.Status == StatusCooldown && now.Before(a.CooldownUtil) &&
++		!(overdraftUsageBypass && a.codexQuotaOverdraftUsageCooldownLocked(now)) {
  		return false
  	}
--	if acc.quotaAutoPausedLocked(now) {
-+	if acc.quotaAutoPausedLocked(now) && !overdraftUsageBypass {
+-	if a.quotaAutoPausedLocked(now) {
++	if a.quotaAutoPausedLocked(now) && !overdraftUsageBypass {
  		return false
  	}
- 	if acc.isRelayStyleLocked() {
+ 	if a.isRelayStyleLocked() {
 diff --git a/config/config.go b/config/config.go
-index 88e4e40..56fed16 100644
+index b586fd2..ef51277 100644
 --- a/config/config.go
 +++ b/config/config.go
 @@ -90,16 +90,17 @@ func (c *CacheConfig) Label() string {
@@ -553,7 +551,7 @@ index af87314..f17230e 100644
  - 生产环境配置
  - 升级指南
 diff --git a/main.go b/main.go
-index 23fb8af..347d5be 100644
+index 37790db..5836e91 100644
 --- a/main.go
 +++ b/main.go
 @@ -48,6 +48,7 @@ func main() {
@@ -1197,7 +1195,7 @@ index 0000000..6bd56aa
 +	}
 +}
 diff --git a/proxy/executor.go b/proxy/executor.go
-index 6ea0203..5b1db18 100644
+index 705c2d1..8065c82 100644
 --- a/proxy/executor.go
 +++ b/proxy/executor.go
 @@ -528,6 +528,9 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
@@ -1210,10 +1208,10 @@ index 6ea0203..5b1db18 100644
  	// lite 信号收敛：签名在 payload 规则改写后采集（规则可注入/删除 WS 标记，改写
  	// 前采集会让注入失效、删除被回填），模型也已被入口映射/规则定稿——已知不支持
  	// lite 的模型带信号上游必 400，发出前剥离。
-@@ -575,7 +578,11 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
- 		if responsesLite {
- 			requestBody = normalizeCodexResponsesLiteBody(requestBody, false)
- 		}
+@@ -578,7 +581,11 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
+ 		// 出站前最后兜底：任何中间改写都不能把普通 input 项放到
+ 		// compaction_trigger 后面，否则上游直接返回 invalid_request_error。
+ 		requestBody = normalizeCompactionTriggerFinal(requestBody, false)
 -		return WebsocketExecuteFunc(ctx, account, requestBody, sessionID, proxyOverride, apiKey, deviceCfg, headers, poolRouteKey)
 +		resp, err := WebsocketExecuteFunc(ctx, account, requestBody, sessionID, proxyOverride, apiKey, deviceCfg, headers, poolRouteKey)
 +		if err == nil && resp != nil && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices && overdraftInjected {
@@ -1223,7 +1221,7 @@ index 6ea0203..5b1db18 100644
  	}
  	if wantWebsocket && WebsocketExecuteFunc == nil {
  		// 请求/配置要求走 WebSocket，但 WS 执行器未注册（如嵌入式调用或初始化顺序问题）。
-@@ -668,6 +675,9 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
+@@ -672,6 +679,9 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
  			}
  			return nil, ErrUpstream(0, "请求上游失败", err)
  		}
@@ -1234,7 +1232,7 @@ index 6ea0203..5b1db18 100644
  	}
  
 diff --git a/proxy/handler.go b/proxy/handler.go
-index a847c83..882555c 100644
+index f39cb9a..557d06f 100644
 --- a/proxy/handler.go
 +++ b/proxy/handler.go
 @@ -983,6 +983,10 @@ func noAvailableAnthropicAccountMessage(model string) string {
@@ -1248,7 +1246,7 @@ index a847c83..882555c 100644
  	handler := &Handler{
  		store:      store,
  		configKeys: make(map[string]bool), // 不再使用硬编码，但保留结构以向后兼容逻辑
-@@ -6096,6 +6100,7 @@ func usageLimitFallbackCooldown(account *auth.Account, body []byte) time.Duratio
+@@ -6131,6 +6135,7 @@ func usageLimitFallbackCooldown(account *auth.Account, body []byte) time.Duratio
  
  // Apply429Cooldown 统一处理 429 对账号状态的影响。
  func Apply429Cooldown(store *auth.Store, account *auth.Account, body []byte, resp *http.Response, model string) codex429Decision {
@@ -1256,7 +1254,7 @@ index a847c83..882555c 100644
  	// Grok 上游的 429 语义（免费额度耗尽/超支限制/Retry-After）与 Codex 不同，且需要落
  	// grok_free_quota 权威快照——批量测试/连通性测试也走这里，必须同样路由到 Grok 专用映射，
  	// 否则免费额度耗尽会被误标 rate_limited 且丢失用量快照。
-@@ -6389,6 +6394,9 @@ func SyncCodexUsageState(store *auth.Store, account *auth.Account, resp *http.Re
+@@ -6424,6 +6429,9 @@ func SyncCodexUsageState(store *auth.Store, account *auth.Account, resp *http.Re
  			result.Premium5hRateLimited = true
  		}
  	}

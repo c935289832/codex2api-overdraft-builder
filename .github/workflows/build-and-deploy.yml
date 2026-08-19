@@ -79,7 +79,9 @@ jobs:
           set -euo pipefail
           git init upstream
           git -C upstream remote add origin "$UPSTREAM_REPO"
-          git -C upstream fetch --depth=1 origin "$UPSTREAM_SHA"
+          # Keep the upstream history/blob objects available: git apply --3way
+          # needs the patch's preimage blobs when upstream moves again.
+          git -C upstream fetch --no-tags origin "$UPSTREAM_SHA"
           git -C upstream checkout --detach FETCH_HEAD
           git -C upstream apply --3way "$GITHUB_WORKSPACE/codex-overdraft.patch"
           git -C upstream diff --check
