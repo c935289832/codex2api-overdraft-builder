@@ -272,10 +272,10 @@ index 0000000..ad161d6
 +	}
 +}
 diff --git a/auth/fast_scheduler.go b/auth/fast_scheduler.go
-index d89c4a2..2a67b96 100644
+index b66ed08..057fa4a 100644
 --- a/auth/fast_scheduler.go
 +++ b/auth/fast_scheduler.go
-@@ -664,21 +664,31 @@ func (a *Account) fastSchedulerSnapshotWithUsageOverride(baseLimit int64, now ti
+@@ -710,21 +710,31 @@ func (a *Account) fastSchedulerSnapshotWithUsageOverride(baseLimit int64, now ti
  	}
  
  	continuationUsageOverride := continuation && a.usageLimitContinuationEligibleLocked(now)
@@ -311,13 +311,13 @@ index d89c4a2..2a67b96 100644
  	}
  
 diff --git a/auth/store.go b/auth/store.go
-index c00b13b..d6e0483 100644
+index 9e83c3c..61d5186 100644
 --- a/auth/store.go
 +++ b/auth/store.go
-@@ -183,6 +183,17 @@ type Account struct {
- 	Reset5hAt           time.Time // 5h 窗口重置时间
- 	UsageUpdatedAt      time.Time // 7d 用量快照刷新时间
- 	UsageUpdatedAt5h    time.Time // 5h 用量快照刷新时间
+@@ -189,6 +189,18 @@ type Account struct {
+ 	ResetSparkAt           time.Time
+ 	UsageUpdatedAtSpark    time.Time
+ 
 +	// CodexQuotaOverdraft* 是独立于 credits 的 5h/7d 透支状态机快照。
 +	// 状态由 proxy 层更新，调度器只读取调度豁免判定。
 +	CodexQuotaOverdraftStatus    string
@@ -327,12 +327,13 @@ index c00b13b..d6e0483 100644
 +	CodexQuotaOverdraftAttempts  int
 +	CodexQuotaOverdraftModel     string
 +	CodexQuotaOverdraftReason    string
-+	CodexQuotaOverdraftStartedAt time.Time
++	CodexQuotaOverdraftStartedAt  time.Time
 +	CodexQuotaOverdraftTestedAt  time.Time
- 
++
  	// RateLimitResetCredits 是 OpenAI 官方账号剩余的「主动重置次数」，来自
  	// /backend-api/wham/usage 响应的 rate_limit_reset_credits.available_count。
-@@ -1209,7 +1220,12 @@ func (a *Account) recomputeSchedulerLocked(baseLimit int64) {
+ 	// -1 表示尚未探测过（未知）；>=0 为已知次数。
+@@ -1217,7 +1229,12 @@ func (a *Account) recomputeSchedulerLocked(baseLimit int64) {
  	a.DispatchScore = dispatchScore
  	a.ScoreBiasEffective = scoreBiasEffective
  	a.BaseConcurrencyEffective = baseConcurrencyEffective
@@ -346,7 +347,7 @@ index c00b13b..d6e0483 100644
  	a.DynamicConcurrencyLimit = a.smartPacingConcurrencyLimitLocked(a.DynamicConcurrencyLimit, now)
  	if a.premium5hRateLimitedLocked(now) && a.DynamicConcurrencyLimit > 1 {
  		a.DynamicConcurrencyLimit = 1
-@@ -1246,15 +1262,17 @@ func (a *Account) isAvailableLocked(now time.Time) bool {
+@@ -1254,15 +1271,17 @@ func (a *Account) isAvailableLocked(now time.Time) bool {
  	if a.healthTierLocked() == HealthTierBanned {
  		return false
  	}
@@ -367,7 +368,7 @@ index c00b13b..d6e0483 100644
  		return false
  	}
  	// 冷却期过了自动恢复
-@@ -4898,6 +4916,7 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
+@@ -4933,6 +4952,7 @@ func (s *Store) buildAccountFromRow(ctx context.Context, row *database.AccountRo
  	// 恢复积分余额快照：积分只有 wham 探针能刷，不恢复的话重启后账号会被判成
  	// 「没积分」——积分顶替限流失效，还会被「清理限流账号」当成真限流删掉。
  	account.RestoreCreditBalanceFromJSON(row.GetCredential("codex_credits"))
@@ -375,7 +376,7 @@ index c00b13b..d6e0483 100644
  	if threshold, ok := row.GetCredentialFloat64("auto_pause_5h_threshold"); ok {
  		account.AutoPause5hThreshold = normalizeQuotaAutoPauseThreshold(threshold)
  	}
-@@ -5586,19 +5605,21 @@ func (s *Store) accountLazySelectable(acc *Account) bool {
+@@ -5622,19 +5642,21 @@ func (s *Store) accountLazySelectable(acc *Account) bool {
  }
  
  func (a *Account) lazySelectableLocked(now time.Time) bool {
@@ -1195,7 +1196,7 @@ index 0000000..6bd56aa
 +	}
 +}
 diff --git a/proxy/executor.go b/proxy/executor.go
-index 705c2d1..8065c82 100644
+index 20e864d..1e76c76 100644
 --- a/proxy/executor.go
 +++ b/proxy/executor.go
 @@ -528,6 +528,9 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
@@ -1221,7 +1222,7 @@ index 705c2d1..8065c82 100644
  	}
  	if wantWebsocket && WebsocketExecuteFunc == nil {
  		// 请求/配置要求走 WebSocket，但 WS 执行器未注册（如嵌入式调用或初始化顺序问题）。
-@@ -672,6 +679,9 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
+@@ -677,6 +684,9 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
  			}
  			return nil, ErrUpstream(0, "请求上游失败", err)
  		}
@@ -1232,10 +1233,10 @@ index 705c2d1..8065c82 100644
  	}
  
 diff --git a/proxy/handler.go b/proxy/handler.go
-index f39cb9a..557d06f 100644
+index 701f417..a393c62 100644
 --- a/proxy/handler.go
 +++ b/proxy/handler.go
-@@ -983,6 +983,10 @@ func noAvailableAnthropicAccountMessage(model string) string {
+@@ -994,6 +994,10 @@ func noAvailableAnthropicAccountMessage(model string) string {
  
  // NewHandler 创建处理器
  func NewHandler(store *auth.Store, db *database.DB, cfg *config.Config, deviceCfg *DeviceProfileConfig) *Handler {
@@ -1246,7 +1247,7 @@ index f39cb9a..557d06f 100644
  	handler := &Handler{
  		store:      store,
  		configKeys: make(map[string]bool), // 不再使用硬编码，但保留结构以向后兼容逻辑
-@@ -6131,6 +6135,7 @@ func usageLimitFallbackCooldown(account *auth.Account, body []byte) time.Duratio
+@@ -6145,6 +6149,7 @@ func usageLimitFallbackCooldown(account *auth.Account, body []byte) time.Duratio
  
  // Apply429Cooldown 统一处理 429 对账号状态的影响。
  func Apply429Cooldown(store *auth.Store, account *auth.Account, body []byte, resp *http.Response, model string) codex429Decision {
@@ -1254,7 +1255,7 @@ index f39cb9a..557d06f 100644
  	// Grok 上游的 429 语义（免费额度耗尽/超支限制/Retry-After）与 Codex 不同，且需要落
  	// grok_free_quota 权威快照——批量测试/连通性测试也走这里，必须同样路由到 Grok 专用映射，
  	// 否则免费额度耗尽会被误标 rate_limited 且丢失用量快照。
-@@ -6424,6 +6429,9 @@ func SyncCodexUsageState(store *auth.Store, account *auth.Account, resp *http.Re
+@@ -6442,6 +6447,9 @@ func SyncCodexUsageState(store *auth.Store, account *auth.Account, resp *http.Re
  			result.Premium5hRateLimited = true
  		}
  	}
