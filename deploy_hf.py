@@ -23,7 +23,15 @@ def main() -> None:
         CommitOperationAdd(path_in_repo=name, path_or_fileobj=str(path))
         for name, path in paths.items()
     ]
-    result = HfApi().create_commit(
+    api = HfApi()
+    api.super_squash_history(
+        repo_id=repo_id,
+        repo_type="space",
+        branch="main",
+        commit_message=f"Compact deployment history before {build_info['upstream_short_sha']}",
+    )
+    print("Compacted Space deployment history")
+    result = api.create_commit(
         repo_id=repo_id,
         repo_type="space",
         operations=operations,
