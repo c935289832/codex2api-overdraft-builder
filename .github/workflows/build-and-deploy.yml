@@ -7,6 +7,10 @@ on:
         description: Read Space status and build logs without deploying
         type: boolean
         default: false
+      rebuild:
+        description: Rebuild the current Space commit without uploading or pruning
+        type: boolean
+        default: false
   schedule:
     - cron: "17 */6 * * *"
   push:
@@ -15,6 +19,8 @@ on:
       - codex-overdraft.patch
       - deploy_hf.py
       - test_deploy_hf.py
+      - verify_hf.py
+      - test_verify_hf.py
       - .github/workflows/build-and-deploy.yml
 
 concurrency:
@@ -30,9 +36,9 @@ env:
 
 jobs:
   diagnose:
-    if: inputs.diagnose == true
+    if: inputs.diagnose == true || inputs.rebuild == true
     runs-on: ubuntu-latest
-    timeout-minutes: 3
+    timeout-minutes: 15
     steps:
       - name: Read Space build diagnostics
         env:
@@ -44,8 +50,39 @@ jobs:
             "https://huggingface.co/api/spaces/${HF_SPACE_ID}/logs/build" > build.log || test "$?" = 28
           tail -c 20000 build.log
 
+      - uses: actions/checkout@v4
+        if: inputs.rebuild == true
+
+      - name: Rebuild current Space and verify health
+        if: inputs.rebuild == true
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          python -m pip install --disable-pip-version-check 'huggingface_hub>=1.0,<2'
+          python - <<'PY'
+          import os
+          import shutil
+          from huggingface_hub import HfApi, hf_hub_download
+
+          repo = os.environ["HF_SPACE_ID"]
+          info = hf_hub_download(repo, "BUILD_INFO.json", repo_type="space")
+          shutil.copyfile(info, "expected-build.json")
+          runtime = HfApi().restart_space(repo, factory_reboot=True)
+          print(f"HF_REBUILD: {runtime.stage}")
+          PY
+          python verify_hf.py --build-info expected-build.json
+
+      - name: Read failed rebuild log
+        if: failure()
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          curl -fsS --max-time 20 -H "Authorization: Bearer ${HF_TOKEN}" \
+            "https://huggingface.co/api/spaces/${HF_SPACE_ID}/logs/build" > build.log || test "$?" = 28
+          tail -c 20000 build.log
+
   build-and-deploy:
-    if: inputs.diagnose != true
+    if: inputs.diagnose != true && inputs.rebuild != true
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -179,7 +216,7 @@ jobs:
 
       - name: Test Hugging Face deployment helper
         if: steps.deploy_check.outputs.needed == 'true'
-        run: python -m unittest -v test_deploy_hf.py
+        run: python -m unittest -v test_deploy_hf.py test_verify_hf.py
 
       - name: Deploy to Hugging Face Space
         if: steps.deploy_check.outputs.needed == 'true'
@@ -189,29 +226,16 @@ jobs:
         run: python deploy_hf.py
 
       - name: Verify Hugging Face runtime
-        if: always()
+        if: steps.deploy_check.outputs.needed == 'true'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        shell: bash
+        run: python verify_hf.py
+
+      - name: Read failed Space build log
+        if: failure()
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
         run: |
-          set -euo pipefail
-          auth_header="Authorization: Bearer ${HF_TOKEN}"
-          runtime="$(curl -fsSL -H "$auth_header" "https://huggingface.co/api/spaces/${HF_SPACE_ID}/runtime")"
-          printf '%s\n' "$runtime"
-          build_log="$(curl -fsSL -H "$auth_header" "https://huggingface.co/api/spaces/${HF_SPACE_ID}/logs/build" || true)"
-          if [[ -n "$build_log" ]]; then
-            printf '%s\n' "$build_log" | tail -c 12000
-          fi
-          stage="$(python -c 'import json,sys; print(json.load(sys.stdin).get("stage", ""))' <<<"$runtime")"
-          if [[ "$stage" != "RUNNING" ]]; then
-            echo "Hugging Face runtime stage is $stage" >&2
-            exit 1
-          fi
-          for attempt in {1..12}; do
-            if curl -fsS --max-time 10 "https://${HF_SPACE_ID///-}.hf.space/health"; then
-              exit 0
-            fi
-            sleep 10
-          done
-          echo "Hugging Face health check failed" >&2
-          exit 1
+          curl -fsS --max-time 20 -H "Authorization: Bearer ${HF_TOKEN}" \
+            "https://huggingface.co/api/spaces/${HF_SPACE_ID}/logs/build" > build.log || test "$?" = 28
+          tail -c 20000 build.log
