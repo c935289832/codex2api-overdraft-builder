@@ -1,5 +1,6 @@
 import json
 import os
+import time
 from pathlib import Path
 
 from huggingface_hub import CommitOperationAdd, HfApi
@@ -22,7 +23,7 @@ def compact_and_prune_history(api: HfApi, repo_id: str, next_short_sha: str) -> 
     orphaned = [
         lfs_file
         for lfs_file in api.list_lfs_files(repo_id=repo_id, repo_type="space")
-        if lfs_file.oid not in referenced_oids
+        if lfs_file.file_oid not in referenced_oids
     ]
     if orphaned:
         reclaimed = sum(lfs_file.size for lfs_file in orphaned)
@@ -34,6 +35,15 @@ def compact_and_prune_history(api: HfApi, repo_id: str, next_short_sha: str) -> 
         )
         print(f"Deleted {len(orphaned)} orphaned LFS objects ({reclaimed} bytes)")
     print("Compacted Space deployment history")
+
+
+def wait_until_paused(api: HfApi, repo_id: str, runtime) -> None:
+    deadline = time.monotonic() + 90
+    while runtime.stage != "PAUSED":
+        if time.monotonic() >= deadline:
+            raise TimeoutError("Space did not finish pausing before deployment")
+        time.sleep(2)
+        runtime = api.get_space_runtime(repo_id=repo_id)
 
 
 def main() -> None:
@@ -57,8 +67,9 @@ def main() -> None:
     api = HfApi()
     # History rewrites also trigger builds. Keep their intermediate revisions
     # from racing the final upload and the pre-existing orphan cleanup.
-    api.pause_space(repo_id=repo_id)
+    paused = api.pause_space(repo_id=repo_id)
     try:
+        wait_until_paused(api, repo_id, paused)
         compact_and_prune_history(api, repo_id, build_info["upstream_short_sha"])
         result = api.create_commit(
             repo_id=repo_id,
