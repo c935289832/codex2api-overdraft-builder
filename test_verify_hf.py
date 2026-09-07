@@ -34,6 +34,11 @@ class VerifySpaceTests(unittest.TestCase):
         self.wait()
         self.assertEqual(self.now, 1)
 
+    def test_sleeping_space_is_woken_before_success(self):
+        self.get.side_effect = [dict(self.running, stage="SLEEPING"), self.healthy, self.running, self.healthy]
+        self.wait()
+        self.assertEqual(self.now, 1)
+
     def test_terminal_build_error_fails(self):
         self.get.return_value = {"stage": "BUILD_ERROR", "errorMessage": "exit 128"}
         with self.assertRaisesRegex(RuntimeError, "BUILD_ERROR: exit 128"):

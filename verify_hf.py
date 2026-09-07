@@ -55,7 +55,7 @@ def wait_for_space(repo_id, build_version, *, timeout=600, interval=10, grace=30
                         print("HF_REBUILD: retrying exit 128 once without cache", flush=True)
                         continue
                     raise RuntimeError(f"Space {stage}: {runtime.get('errorMessage', '')}")
-            elif stage == "RUNNING":
+            elif stage in {"RUNNING", "SLEEPING"}:
                 for domain in runtime.get("domains", []):
                     host = domain.get("domain", "")
                     if not host.endswith(".hf.space") or any(c in host for c in "/:@"):
@@ -65,10 +65,10 @@ def wait_for_space(repo_id, build_version, *, timeout=600, interval=10, grace=30
                     except (URLError, TimeoutError, ValueError):
                         last = "RUNNING, health temporarily unavailable"
                         continue
-                    if health.get("status") == "ok" and health.get("build_version") == build_version:
+                    if stage == "RUNNING" and health.get("status") == "ok" and health.get("build_version") == build_version:
                         print(f"HF_READY: RUNNING health=ok build_version={build_version}", flush=True)
                         return
-                    last = "RUNNING, health status or build version does not match"
+                    last = f"{stage}, waiting for matching running health"
             print(f"HF_WAIT: {last}", flush=True)
         time.sleep(min(interval, max(0, deadline - time.monotonic())))
     raise TimeoutError(f"Space not ready after {timeout}s: {last}")
