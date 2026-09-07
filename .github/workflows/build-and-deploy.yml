@@ -2,6 +2,11 @@ name: Build and deploy patched Codex2API
 
 on:
   workflow_dispatch:
+    inputs:
+      diagnose:
+        description: Read Space status and build logs without deploying
+        type: boolean
+        default: false
   schedule:
     - cron: "17 */6 * * *"
   push:
@@ -24,7 +29,23 @@ env:
   HF_SPACE_ID: axm0121/SelfCodex2api
 
 jobs:
+  diagnose:
+    if: inputs.diagnose == true
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Read Space build diagnostics
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          curl -fsS --max-time 15 -H "Authorization: Bearer ${HF_TOKEN}" \
+            "https://huggingface.co/api/spaces/${HF_SPACE_ID}/runtime"
+          curl -fsS --max-time 20 -H "Authorization: Bearer ${HF_TOKEN}" \
+            "https://huggingface.co/api/spaces/${HF_SPACE_ID}/logs/build" > build.log || test "$?" = 28
+          tail -c 20000 build.log
+
   build-and-deploy:
+    if: inputs.diagnose != true
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
