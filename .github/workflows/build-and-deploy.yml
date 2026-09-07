@@ -226,10 +226,10 @@ jobs:
         run: python deploy_hf.py
 
       - name: Verify Hugging Face runtime
-        if: steps.deploy_check.outputs.needed == 'true'
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: python verify_hf.py
+          EXPECTED_BUILD_VERSION: ${{ steps.upstream.outputs.build_version }}
+        run: python verify_hf.py --build-version "$EXPECTED_BUILD_VERSION" --rebuild-on-exit-128
 
       - name: Read failed Space build log
         if: failure()

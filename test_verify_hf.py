@@ -73,6 +73,27 @@ class VerifySpaceTests(unittest.TestCase):
             self.wait()
         self.assertEqual(self.get.call_count, 1)
 
+    def test_exit_128_rebuild_is_bounded_and_health_still_required(self):
+        failure = {"stage": "BUILD_ERROR", "errorMessage": "Job failed with exit code: 128. Reason: Error"}
+        self.get.side_effect = [failure, self.running, self.healthy]
+        with patch.object(verify_hf, "rebuild_space") as restart:
+            verify_hf.wait_for_space("owner/space", self.version, grace=0, rebuild_on_exit_128=True)
+            restart.assert_called_once_with("owner/space")
+
+    def test_repeated_exit_128_fails_after_one_rebuild(self):
+        self.get.return_value = {"stage": "BUILD_ERROR", "errorMessage": "Job failed with exit code: 128. Reason: Error"}
+        with patch.object(verify_hf, "rebuild_space") as restart:
+            with self.assertRaisesRegex(RuntimeError, "exit code: 128"):
+                verify_hf.wait_for_space("owner/space", self.version, grace=0, rebuild_on_exit_128=True)
+            restart.assert_called_once()
+
+    def test_other_build_error_is_not_rebuilt(self):
+        self.get.return_value = {"stage": "BUILD_ERROR", "errorMessage": "Dockerfile syntax error"}
+        with patch.object(verify_hf, "rebuild_space") as restart:
+            with self.assertRaisesRegex(RuntimeError, "Dockerfile syntax error"):
+                verify_hf.wait_for_space("owner/space", self.version, grace=0, rebuild_on_exit_128=True)
+            restart.assert_not_called()
+
     def test_network_failure_retries(self):
         self.get.side_effect = [URLError("offline"), self.running, self.healthy]
         self.wait()

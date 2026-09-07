@@ -13,10 +13,21 @@ def get_json(url, token=None):
         return json.load(response)
 
 
-def wait_for_space(repo_id, build_version, *, timeout=600, interval=10, grace=30):
+def rebuild_space(repo_id):
+    request = Request(
+        f"https://huggingface.co/api/spaces/{repo_id}/restart?factory=true",
+        headers={"Authorization": f"Bearer {os.environ['HF_TOKEN']}"},
+        method="POST",
+    )
+    with urlopen(request, timeout=30) as response:
+        json.load(response)
+
+
+def wait_for_space(repo_id, build_version, *, timeout=600, interval=10, grace=30, rebuild_on_exit_128=False):
     started = time.monotonic()
     deadline = started + timeout
     last = "not checked"
+    rebuilt = False
     while time.monotonic() < deadline:
         try:
             runtime = get_json(
@@ -35,6 +46,14 @@ def wait_for_space(repo_id, build_version, *, timeout=600, interval=10, grace=30
             if stage in {"BUILD_ERROR", "RUNTIME_ERROR", "CONFIG_ERROR"}:
                 # HF may briefly report the previous build's state after a commit/restart.
                 if time.monotonic() - started >= grace:
+                    error = runtime.get("errorMessage", "")
+                    if (rebuild_on_exit_128 and not rebuilt and stage == "BUILD_ERROR"
+                            and error.startswith("Job failed with exit code: 128.")):
+                        rebuild_space(repo_id)
+                        rebuilt = True
+                        started = time.monotonic()
+                        print("HF_REBUILD: retrying exit 128 once without cache", flush=True)
+                        continue
                     raise RuntimeError(f"Space {stage}: {runtime.get('errorMessage', '')}")
             elif stage == "RUNNING":
                 for domain in runtime.get("domains", []):
@@ -57,10 +76,15 @@ def wait_for_space(repo_id, build_version, *, timeout=600, interval=10, grace=30
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--build-info", default="dist/BUILD_INFO.json")
+    expected = parser.add_mutually_exclusive_group()
+    expected.add_argument("--build-info", default="dist/BUILD_INFO.json")
+    expected.add_argument("--build-version")
+    parser.add_argument("--rebuild-on-exit-128", action="store_true")
     args = parser.parse_args()
-    info = json.loads(Path(args.build_info).read_text(encoding="utf-8"))
-    wait_for_space(os.environ["HF_SPACE_ID"], info["build_version"])
+    version = args.build_version
+    if version is None:
+        version = json.loads(Path(args.build_info).read_text(encoding="utf-8"))["build_version"]
+    wait_for_space(os.environ["HF_SPACE_ID"], version, rebuild_on_exit_128=args.rebuild_on_exit_128)
 
 
 if __name__ == "__main__":
