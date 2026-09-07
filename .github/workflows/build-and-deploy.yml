@@ -166,3 +166,31 @@ jobs:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           DEPLOY_DIR: dist
         run: python deploy_hf.py
+
+      - name: Verify Hugging Face runtime
+        if: always()
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          auth_header="Authorization: Bearer ${HF_TOKEN}"
+          runtime="$(curl -fsSL -H "$auth_header" "https://huggingface.co/api/spaces/${HF_SPACE_ID}/runtime")"
+          printf '%s\n' "$runtime"
+          build_log="$(curl -fsSL -H "$auth_header" "https://huggingface.co/api/spaces/${HF_SPACE_ID}/logs/build" || true)"
+          if [[ -n "$build_log" ]]; then
+            printf '%s\n' "$build_log" | tail -c 12000
+          fi
+          stage="$(python -c 'import json,sys; print(json.load(sys.stdin).get("stage", ""))' <<<"$runtime")"
+          if [[ "$stage" != "RUNNING" ]]; then
+            echo "Hugging Face runtime stage is $stage" >&2
+            exit 1
+          fi
+          for attempt in {1..12}; do
+            if curl -fsS --max-time 10 "https://${HF_SPACE_ID///-}.hf.space/health"; then
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "Hugging Face health check failed" >&2
+          exit 1
