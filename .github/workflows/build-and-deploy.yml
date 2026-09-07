@@ -114,7 +114,7 @@ jobs:
       - name: Test patch
         if: steps.deploy_check.outputs.needed == 'true'
         working-directory: upstream
-        run: go test ./auth ./proxy -run CodexQuotaOverdraft -count=1
+        run: go test ./auth ./proxy -run 'CodexQuotaOverdraft|UpstreamTrace|StoredModelCapabilities' -count=1
 
       - name: Build Linux service
         if: steps.deploy_check.outputs.needed == 'true'

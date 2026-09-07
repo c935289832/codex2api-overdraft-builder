@@ -1196,10 +1196,10 @@ index 0000000..6bd56aa
 +	}
 +}
 diff --git a/proxy/executor.go b/proxy/executor.go
-index 20e864d..1e76c76 100644
+index c29d7619feca7a87be252e6fb0027fad93106f27..748693417eeb8e17b9c3c5a4e7c79eb23195401a 100644
 --- a/proxy/executor.go
 +++ b/proxy/executor.go
-@@ -528,6 +528,9 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
+@@ -545,6 +545,9 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
  	// 指纹收敛在 WS/HTTP 分叉前统一改写请求体，两条上游路径共享结果；请求头侧的
  	// 收敛（ApplyCodexFingerprintHeaders）从同一份「账号 + 下游头」推导，取值一致。
  	requestBody = ApplyCodexFingerprintToBody(requestBody, account, headers)
@@ -1209,20 +1209,17 @@ index 20e864d..1e76c76 100644
  	// lite 信号收敛：签名在 payload 规则改写后采集（规则可注入/删除 WS 标记，改写
  	// 前采集会让注入失效、删除被回填），模型也已被入口映射/规则定稿——已知不支持
  	// lite 的模型带信号上游必 400，发出前剥离。
-@@ -578,7 +581,11 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
- 		// 出站前最后兜底：任何中间改写都不能把普通 input 项放到
- 		// compaction_trigger 后面，否则上游直接返回 invalid_request_error。
- 		requestBody = normalizeCompactionTriggerFinal(requestBody, false)
--		return WebsocketExecuteFunc(ctx, account, requestBody, sessionID, proxyOverride, apiKey, deviceCfg, headers, poolRouteKey)
-+		resp, err := WebsocketExecuteFunc(ctx, account, requestBody, sessionID, proxyOverride, apiKey, deviceCfg, headers, poolRouteKey)
+@@ -605,6 +608,9 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
+ 		recordTrace := beginUpstreamTrace(ctx, account, traceProxy, true)
+ 		resp, err := WebsocketExecuteFunc(ctx, account, requestBody, sessionID, proxyOverride, apiKey, deviceCfg, headers, poolRouteKey)
+ 		recordTrace(resp)
 +		if err == nil && resp != nil && resp.StatusCode >= http.StatusOK && resp.StatusCode < http.StatusMultipleChoices && overdraftInjected {
 +			observeCodexQuotaOverdraftBusinessSuccess(codexQuotaOverdraftStore.Load(), account, overdraftModel, resp.Header)
 +		}
-+		return resp, err
+ 		return resp, err
  	}
  	if wantWebsocket && WebsocketExecuteFunc == nil {
- 		// 请求/配置要求走 WebSocket，但 WS 执行器未注册（如嵌入式调用或初始化顺序问题）。
-@@ -677,6 +684,9 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
+@@ -719,6 +725,9 @@ func ExecuteRequest(ctx context.Context, account *auth.Account, requestBody []by
  			}
  			return nil, ErrUpstream(0, "请求上游失败", err)
  		}
@@ -1233,13 +1230,13 @@ index 20e864d..1e76c76 100644
  	}
  
 diff --git a/proxy/handler.go b/proxy/handler.go
-index 701f417..a393c62 100644
+index 5ee1a6a97084265d052c648086432280ff41f587..085de688e426ab1bd26558b41f3c9f5b9471e6b5 100644
 --- a/proxy/handler.go
 +++ b/proxy/handler.go
-@@ -994,6 +994,10 @@ func noAvailableAnthropicAccountMessage(model string) string {
- 
+@@ -1181,6 +1181,10 @@ func noAvailableAnthropicAccountMessage(model string) string {
  // NewHandler 创建处理器
  func NewHandler(store *auth.Store, db *database.DB, cfg *config.Config, deviceCfg *DeviceProfileConfig) *Handler {
+ 	restoreModelCapabilities(store, db)
 +	setCodexQuotaOverdraftStore(store)
 +	if cfg != nil {
 +		auth.SetCodexQuotaOverdraftEnabled(cfg.CodexQuotaOverdraftEnabled)
@@ -1247,7 +1244,7 @@ index 701f417..a393c62 100644
  	handler := &Handler{
  		store:      store,
  		configKeys: make(map[string]bool), // 不再使用硬编码，但保留结构以向后兼容逻辑
-@@ -6145,6 +6149,7 @@ func usageLimitFallbackCooldown(account *auth.Account, body []byte) time.Duratio
+@@ -8012,6 +8016,7 @@ func usageLimitFallbackCooldown(account *auth.Account, body []byte) time.Duratio
  
  // Apply429Cooldown 统一处理 429 对账号状态的影响。
  func Apply429Cooldown(store *auth.Store, account *auth.Account, body []byte, resp *http.Response, model string) codex429Decision {
@@ -1255,7 +1252,7 @@ index 701f417..a393c62 100644
  	// Grok 上游的 429 语义（免费额度耗尽/超支限制/Retry-After）与 Codex 不同，且需要落
  	// grok_free_quota 权威快照——批量测试/连通性测试也走这里，必须同样路由到 Grok 专用映射，
  	// 否则免费额度耗尽会被误标 rate_limited 且丢失用量快照。
-@@ -6442,6 +6447,9 @@ func SyncCodexUsageState(store *auth.Store, account *auth.Account, resp *http.Re
+@@ -8323,6 +8328,9 @@ func SyncCodexUsageState(store *auth.Store, account *auth.Account, resp *http.Re
  			result.Premium5hRateLimited = true
  		}
  	}
