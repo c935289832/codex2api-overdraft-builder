@@ -55,13 +55,20 @@ def main() -> None:
         for name, path in paths.items()
     ]
     api = HfApi()
-    compact_and_prune_history(api, repo_id, build_info["upstream_short_sha"])
-    result = api.create_commit(
-        repo_id=repo_id,
-        repo_type="space",
-        operations=operations,
-        commit_message=commit_message,
-    )
+    # History rewrites also trigger builds. Keep their intermediate revisions
+    # from racing the final upload and the pre-existing orphan cleanup.
+    api.pause_space(repo_id=repo_id)
+    try:
+        compact_and_prune_history(api, repo_id, build_info["upstream_short_sha"])
+        result = api.create_commit(
+            repo_id=repo_id,
+            repo_type="space",
+            operations=operations,
+            commit_message=commit_message,
+        )
+    finally:
+        # Also resume the retained version if maintenance or upload failed.
+        api.restart_space(repo_id=repo_id, factory_reboot=True)
     print(result.oid)
 
 
